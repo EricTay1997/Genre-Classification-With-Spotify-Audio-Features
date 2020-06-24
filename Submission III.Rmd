@@ -1,0 +1,1255 @@
+---
+title: "Submission III"
+output:
+  html_document: default
+---
+
+```{r message = FALSE}
+# One would need to download these packages
+library(dplyr) #0.8.5
+library(tidyr) #1.0.2
+library(ggplot2) #3.3.0
+library(tidyverse) #1.3.0
+library(repr) #1.1.0
+library(Dict) #0.1.0
+library(fcd) #0.1
+library(mclust) #5.4.6
+library(caret) #6.0-86
+library(fossil) #0.4.0
+library(kernlab) #0.9-29
+library(conclust) #1.1
+library(randomForest) #4.6-14
+library(xgboost) #1.0.0.2
+```
+
+```{r}
+songs <- read.csv('SpotifyFeatures.csv')
+```
+
+# EDA and Data Treatment
+
+```{r}
+summary(songs)
+```
+
+* Note, documentation on Spotify's API states that for acousticness, danceability, energy, instrumentalness, liveness, speechiness, and valuence, the minimum is 0 and maximum is 1. We shall report this for simplicity.
+
+```{r}
+# No NA values
+sum(is.na(songs))
+```
+
+
+```{r}
+# Categorical variables
+levels(songs$key)
+levels(songs$time_signature)
+levels(songs$mode)
+levels(songs$genre)
+```
+
+* We notice that Children's Music is repeated due to apostrophe formatting
+
+```{r}
+#Replace Children’s Music
+songs$genre <- as.character(songs$genre)
+songs$genre[songs$genre == "Children’s Music"] <- "Children's Music"
+songs$genre[songs$genre == "Children's Music"] <- "Children's_Music"
+#No Duplications
+children <- subset(songs, genre == "Children's Music")
+length(children$track_id[duplicated(children$track_id)])
+```
+
+```{r}
+counts <- songs %>% group_by(genre) %>% tally()
+counts
+barplot(counts$n, col = as.factor(counts$genre), names.arg=counts$genre, las=2)
+```
+
+```{r}
+subset(counts, genre == "A Capella")$n
+# Remove A Capella due to lack of samples
+songs <- subset(songs, genre != "A Capella")
+counts <- songs %>% group_by(genre) %>% tally()
+```
+
+```{r}
+# Songs with multiple genre labels
+duplicated_ids = unique(songs$track_id[duplicated(songs$track_id)])
+duplicated_ids = as.vector(duplicated_ids)
+length(duplicated_ids)
+nrow(subset(songs, (track_id %in% duplicated_ids)))
+```
+
+* We note that 35124 songs have multiple lables (~2.6 each). This could indicate presence of super-genre clusters.
+
+```{r}
+colnames(songs)
+#Get continuous variables
+feature_names = names(songs)[c(5,6,7,8,9,10,12,13,15,16,18)]
+```
+
+```{r}
+# Code for plotting, adapted from https://www.kaylinpavlik.com/classifying-songs-genres/
+plotting <- function(i, data, cols){
+  return(data %>%
+    dplyr::select(c('genre', feature_names[i])) %>%
+    pivot_longer(cols = feature_names[i]) %>%
+    ggplot(aes(x = value)) +
+    geom_density(aes(color = genre), alpha = 0.5) +
+    facet_wrap(~name, ncol = cols, scales = 'free') +
+    labs(title = 'Spotify Audio Feature Density',
+         x = '', y = 'density'))
+}
+```
+
+```{r}
+# Obtain distribution over each variable for different genres
+for (i in 1:length(feature_names)){
+  print(plotting(i, songs, 1))
+}
+```
+
+## Some Trends
+
+* Popularity: Movie has very low popularity
+* Acousticness: Very low for Ska and Electronic, very high for Opera and Classical
+* Energy: Very low for Opera, Classical, Soundtrack, very high for Ska
+* Comedy: High liveness and speechiness
+* Valence: Very low for Opera, Classical, Sountrack 
+* From this, we expect Opera, Classical, Sountrack to possibly be a cluster
+* Genres seem to have sufficient difference in distributions, especially for Danceability, Energy, and Tempo. This gives us confidence that we will be able to have predictive power using audio features.
+
+```{r}
+# Sample code to check validity of above statements, since colors can be confusing
+# First parameter is the graph to view: 1 is first graph on popularity
+# Second parameter is the genre to view, comparing density values would validate the above statement. Full code is not explicity written out for brevity
+plotting(1, subset(songs, genre == "Movie"), 1)
+```
+
+```{r}
+# We list potential clusters from trend analysis above
+cluster1 <- subset(songs, genre == "Opera" | genre == "Classical" | genre == "Soundtrack")
+cluster2 <- subset(songs, genre == "Reggae" | genre == "Reggaeton")
+cluster3 <- subset(songs, genre == "Hip-Hop" | genre == "Rap")
+```
+
+```{r}
+# We plot each cluster over continuous variables 
+plotting(c(1,2,3,4,5,6,7,8,9,10,11), cluster1, 3)
+plotting(c(1,2,3,4,5,6,7,8,9,10,11), cluster2, 3)
+plotting(c(1,2,3,4,5,6,7,8,9,10,11), cluster3, 3)
+```
+
+* Plots indicate that our hypothesis of genre super-clusters may be correct.
+
+# Data Treatment
+
+```{r}
+# Convert Categorical Variables to Binary Indicators
+songs$major <- as.numeric(songs$mode == "Major")
+songs$time0 <- as.numeric(songs$time_signature == "0/4")
+songs$time1 <- as.numeric(songs$time_signature == "1/4")
+songs$time3 <- as.numeric(songs$time_signature == "3/4")
+songs$time4 <- as.numeric(songs$time_signature == "4/4")
+songs$time5 <- as.numeric(songs$time_signature == "5/4")
+songs$major <- as.numeric(songs$mode == "Major")
+songs$Cnat <- as.numeric(songs$key == "C")
+songs$Csharp <- as.numeric(songs$key == "C#")
+songs$Dnat <- as.numeric(songs$key == "D")
+songs$Dsharp <- as.numeric(songs$key == "D#")
+songs$Enat <- as.numeric(songs$key == "E")
+songs$Fnat <- as.numeric(songs$key == "F")
+songs$Fsharp <- as.numeric(songs$key == "F#")
+songs$Gnat <- as.numeric(songs$key == "G")
+songs$Gsharp <- as.numeric(songs$key == "G#")
+songs$Anat <- as.numeric(songs$key == "A")
+songs$Asharp <- as.numeric(songs$key == "A#")
+songs$Bnat <- as.numeric(songs$key == "B")
+# Remove original categorical variables
+songs <- songs[,-c(11,14,17)]
+```
+
+```{r}
+# Center and Scale Data
+songs <- cbind(songs[,c(1:4)],scale(songs[,c(5:33)]))
+```
+
+```{r}
+# Variation across original continuous variables still exists post transformation
+for (i in 1:length(feature_names)){
+  print(plotting(i, songs, 1))
+}
+```
+
+# Clustering - Classification Split
+
+
+```{r}
+# Remove songs with multiple genre labels
+not_duplicated = subset(songs, !(track_id %in% duplicated_ids))
+counts_nd <- not_duplicated %>% group_by(genre) %>% tally()
+min(counts_nd$n)
+```
+```{r}
+counts$n2 = counts_nd$n
+ggplot(data=counts, aes(x=genre, fill = as.factor(genre))) +
+  geom_bar(aes(y=n), position ="identity", stat="identity", alpha = 0.3) +
+  geom_bar(aes(y=n2), position ="identity", stat="identity", alpha = 1) +
+  labs(x = "Genre", y = "Number of Songs") +
+  ggtitle("Number of Songs per Genre")+
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+```
+
+```{r}
+# Store songs for each genre
+genres = sort(unique(songs$genre))
+classification_samples = list()
+classification_ids = c()
+set.seed(1)
+for (i in 1:length(genres)){
+  df = subset(not_duplicated, genre == genres[i])
+  # This randomly shuffles our samples to allow for random samples later
+  shuffled = df[sample(nrow(df)),][c(1:490),c(1,4:16)]
+  classification_ids = c(classification_ids, as.vector(shuffled$track_id))
+  classification_samples[[i]] <- shuffled[,-c(2)]
+}
+```
+
+```{r}
+songs = subset(songs, !(track_id %in% classification_ids))
+```
+
+# Clustering
+
+## Adjusted Rand
+
+```{r}
+ca = songs$genre
+random = floor(runif(length(ca), min = 0, max = 24))
+adjustedRandIndex(ca,random)
+adjustedRandIndex(ca,ca)
+```
+
+* 0 indicates random assignment, 1 indicates complete similarity between clusterings 
+
+## Selecting Predictive Variables
+
+```{r}
+colnames(songs)
+```
+
+
+```{r}
+# With all categorical variables
+set.seed(1)
+km.res <- kmeans(songs[,c(5:33)], 25, iter.max = 10, nstart = 10)
+clusters <- km.res$cluster
+adjustedRandIndex(songs$genre,clusters)
+```
+
+```{r}
+# With just mode categorical variables
+km.res <- kmeans(songs[,c(5:16)], 25, iter.max = 10, nstart = 10)
+clusters <- km.res$cluster
+adjustedRandIndex(songs$genre,clusters)
+```
+
+```{r}
+# With no categorical variables
+km.res <- kmeans(songs[,c(5:15)], 25, iter.max = 10, nstart = 10)
+clusters <- km.res$cluster
+adjustedRandIndex(songs$genre,clusters)
+```
+
+```{r}
+# With no categorical variables, no duration
+km.res <- kmeans(songs[,c(5:7,9:15)], 25, iter.max = 10, nstart = 10)
+clusters <- km.res$cluster
+adjustedRandIndex(songs$genre,clusters)
+```
+
+```{r}
+# With no categorical variables, no instrumentalness
+km.res <- kmeans(songs[,c(5:9, 11:15)], 25, iter.max = 10, nstart = 10)
+clusters <- km.res$cluster
+adjustedRandIndex(songs$genre,clusters)
+```
+
+* We note significant decrease in performance when time signature and key categorical variables are added. We shall therefore take them out. Other forms of clustering (spectral, hierarchical), along with different initializations were also tried, reaching the same conclusion. This is not included for brevity, and computational concerns (we are clustering over 200,000 songs, and the code for doing so can be extracted from below). One may also increase nstart to verify these claims. 
+
+* We also note that kmeans provides poor clustering, as it clusters in a way that does not follow the genre labels. There is hence motivation to use semi-supervised clustering, when clustering based on songs. 
+* Removing Mode is an option, but there generally was no signficant difference in clustering "performance", and this variable might be useful for other clustering methods, so we left it in.
+
+* Removing other numerical variables reduce accuracy.
+
+## Sensitivity Analysis
+
+```{r}
+# Store songs by genre
+ls = list()
+set.seed(1)
+for (i in 1:length(genres)){
+  df = subset(songs, genre == genres[i])
+  # This randomly shuffles our samples to allow for random samples later
+  shuffled = df[sample(nrow(df)),] 
+  ls[[i]] <- shuffled
+}
+```
+
+```{r}
+# Create Train and Test/Validation Set
+# Each Set has 100 of each genre
+train = data.frame()
+num = 100
+for (i in 1:length(genres)){
+  train_rows = seq(1,num,1)
+  train = rbind(train,ls[[i]][train_rows,])
+}
+train %>% group_by(genre) %>% tally()
+```
+
+```{r}
+hclustfunc <- function(x, method = "complete", dmeth = "euclidean") {    
+    hclust(dist(x, method = dmeth), method = method)
+}
+```
+
+```{r}
+set.seed(1)
+hclust_avg <- hclustfunc(train[,c(5:7,9:15)])
+cut_avg <- cutree(hclust_avg, k=25)
+adjustedRandIndex(train$genre,cut_avg)
+```
+
+```{r}
+hclust_avg <- hclustfunc(train[,c(5:9,11:15)])
+cut_avg <- cutree(hclust_avg, k=25)
+adjustedRandIndex(train$genre,cut_avg)
+```
+
+```{r}
+hclust_avg <- hclustfunc(train[,c(5:15)])
+cut_avg <- cutree(hclust_avg, k=25)
+adjustedRandIndex(train$genre,cut_avg)
+```
+
+```{r}
+hclust_avg <- hclustfunc(train[,c(5:16)])
+cut_avg <- cutree(hclust_avg, k=25)
+adjustedRandIndex(train$genre,cut_avg)
+```
+
+```{r}
+hclust_avg <- hclustfunc(train[,c(5:33)])
+cut_avg <- cutree(hclust_avg, k=25)
+adjustedRandIndex(train$genre,cut_avg)
+```
+
+* Conclusions are mostly the same. However, removing duration and addming improves agreement. We shall keep them in as predictor variables for now.
+
+## Clustering Using Pairs
+
+```{r}
+# Run this code to get pairs
+# Code is commented out due to the amount of time it takes to run ~ 2 hours
+
+# d = dict()
+# for (i in 1:length(duplicated_ids)){
+#   if (i %% 10 == 0){
+#     print(i)
+#   }
+#   id = duplicated_ids[i]
+#   duplicated_track = subset(songs, track_id == id)
+#   genres = sort(duplicated_track$genre)
+#   for (j in 1:(length(genres)-1)){
+#     for (k in (j+1):length(genres)){
+#       genre_pair = paste(genres[j],genres[k])
+#       if (! genre_pair %in% d$keys){
+#         d[genre_pair] = 0
+#       }
+#       d[genre_pair] = d[genre_pair]+1
+#     }
+#   }
+# }
+# vals = c()
+# for (i in 1:length(d$keys)){
+#   vals = c(vals, d[d$keys[i]])
+# }
+# pairs <- data.frame(pairs = d$keys, count = vals)
+# write.csv(pairs, "genre_pairs.csv")
+pairs <- read.csv("genre_pairs.csv")
+```
+
+```{r}
+pairs
+```
+
+```{r}
+# Get Adjacency Matrix, used for Spectral Clustering
+genres = sort(unique(songs$genre))
+weight <- matrix(data = rep(0,length(genres)^2), nrow = length(genres), ncol = length(genres))
+for (i in 1:nrow(pairs)){
+  pair <- strsplit(as.character(pairs[i,2]), " ")
+  index1 = match(pair[[1]][1],genres)
+  index2 = match(pair[[1]][2],genres)
+  weight[index1, index2] = pairs[i,3]
+  weight[index2, index1] = pairs[i,3]
+}
+weight
+```
+
+## Getting Overall Column Means by Genre
+
+```{r}
+means = matrix(NA, nrow = 25, ncol = 12)
+for (i in 1:length(genres)){
+  df = subset(songs, genre == genres[i])
+  means[i,] <- colMeans(df[,c(5:16)])
+}
+```
+
+## Comparing Clusterings
+
+```{r}
+# Get measure of agreement across 4 clustering methods
+# 1: Spectral Clustering using Pairs
+# 2: Spectral Clustering using Means
+# 3: Hierarchical Clustering using Means
+# 4: K-Means Clustering using Means
+
+k_score <- c()
+h_score <- c()
+s_score <- c()
+sh_score <- c()
+sk_score <- c()
+hk_score <- c()
+for (k in 1:24){
+  set.seed(1)
+  spectral <- spectral.clustering(weight, K = k)
+  set.seed(1)
+  hclust_avg <- hclustfunc(means)
+  cut_avg <- cutree(hclust_avg, k=k)
+  set.seed(1)
+  k_cluster <- kmeans(means, k, nstart = 100)$cluster
+  # Spectral Clustering does not work for k = 1, or k > 17. 
+  # This is not a huge issue because high k does not provide us with meaningful conclusions
+  # Most clusters will only have 1 genre inside
+  # Plus, results from K-means and Hierarchical Clustering indicate low degree of similarity at high number of clusters
+  if (k < 18 && k > 1){
+    set.seed(1)
+    sc <- specc(means, centers = k)
+    s_score = c(s_score, adj.rand.index(spectral, slot(sc, name = ".Data")))
+    sh_score = c(sh_score, adj.rand.index(cut_avg, slot(sc, name = ".Data")))
+    sk_score = c(sk_score, adj.rand.index(k_cluster, slot(sc, name = ".Data")))
+  } else{
+    s_score = c(s_score,0)
+    sh_score = c(sh_score,0)
+    sk_score = c(sk_score,0)
+  }
+  h_score = c(h_score, adj.rand.index(spectral, cut_avg))
+  k_score = c(k_score, adj.rand.index(spectral, k_cluster))
+  hk_score = c(hk_score, adj.rand.index(k_cluster, cut_avg))
+}
+```
+
+```{r}
+k = seq(1,24,1)
+total = h_score + s_score + k_score + sh_score + sk_score + hk_score
+plot(k, total[k])
+```
+* We pick 8 clusters, it provides the granularity we desire ~3 per cluster, and has good agreement in clustering assignments across different clustering methods. 
+
+```{r}
+# 1: Spectral Clustering using Pairs
+set.seed(1)
+k = 8
+cluster_assignments <- spectral.clustering(weight, K = k)
+for (i in 1:k){
+  for (j in 1:length(cluster_assignments)){
+    if (cluster_assignments[j] == i){
+      cat(i, genres[j], "\n")
+    }
+  }
+}
+```
+
+```{r}
+# Store these assignments
+groups = list()
+groups[[1]] <- c("Classical", "Electronic", "Jazz", "Opera", "World")
+groups[[2]] <- c("Children's_Music")
+groups[[3]] <- c("Blues", "Comedy", "Country", "Folk", "Indie", "Rock")
+groups[[4]] <- c("Alternative")
+groups[[5]] <- c("Reggae", "Ska")
+groups[[6]] <- c("Hip-Hop", "Pop", "Rap", "Reggaeton")
+groups[[7]] <- c("Anime", "Movie", "Soundtrack")
+groups[[8]] <- c("Dance", "R&B", "Soul")
+```
+
+```{r}
+# 2: Spectral Clustering using Means
+set.seed(1)
+sc <- specc(means, centers = 8)
+clusters <- slot(sc, name = ".Data")
+clust <- c()
+for (i in 1:25){
+  clust <- c(clust, paste(clusters[i], genres[i]))
+}
+sort(clust)
+```
+
+```{r}
+groups[[9]] <- c("Dance", "Hip-Hop", "Pop", "R&B", "Rap")
+groups[[10]] <- c("Alternative", "Country", "Indie", "Rock")
+groups[[11]] <- c("Classical", "Soundtrack", "Opera")
+groups[[12]] <- c("Anime", "Electronic", "World")
+groups[[13]] <- c("Blues", "Children's_Music", "Movie")
+groups[[14]] <- c("Reggae", "Reggaeton", "Ska")
+groups[[15]] <- c("Comedy")
+groups[[16]] <- c("Folk", "Jazz", "Soul")
+```
+
+```{r}
+# 3: Hierarchical Clustering using Means
+set.seed(1)
+hclust_avg <- hclustfunc(means)
+cut_avg <- cutree(hclust_avg, k=8)
+clust <- c()
+for (i in 1:length(cut_avg)){
+  clust <- c(clust, paste(cut_avg[i], genres[i]))
+}
+sort(clust)
+```
+
+```{r}
+groups[[17]] <- c("Alternative", "Country", "Folk", "Indie", "R&B", "Rock", "Soul")
+groups[[18]] <- c("Anime", "Blues", "Children's_Music", "Electronic", "Jazz", "World")
+groups[[19]] <- c("Classical", "Soundtrack")
+groups[[20]] <- c("Comedy")
+groups[[21]] <- c("Dance", "Hip-Hop", "Pop", "Rap")
+groups[[22]] <- c("Movie")
+groups[[23]] <- c("Opera")
+groups[[24]] <- c("Reggae", "Reggaeton", "Ska")
+```
+
+```{r}
+# 4: K-Means Clustering using Means
+set.seed(1)
+km.res <- kmeans(means, 8, nstart = 100)
+clusters <- km.res$cluster
+clust <- c()
+for (i in 1:25){
+  clust <- c(clust, paste(clusters[i], genres[i]))
+}
+sort(clust)
+```
+
+```{r}
+groups[[25]] <- c("Reggae", "Reggaeton", "Ska")
+groups[[26]] <- c("Classical", "Soundtrack") 
+groups[[27]] <- c("Movie") 
+groups[[28]] <- c("Alternative", "Children's_Music", "Country", "Folk", "Indie", "R&B", "Rock", "Soul") 
+groups[[29]] <- c("Anime", "Blues", "Electronic", "Jazz", "World") 
+groups[[30]] <- c("Opera")
+groups[[31]] <- c("Dance", "Hip-Hop", "Pop", "Rap")
+groups[[32]] <- c("Comedy")
+```
+
+## Constrained Clustering
+
+```{r}
+# Create Train and Test/Validation Set
+# Each Set has 50 of each genre
+batch1 = data.frame()
+batch2 = data.frame()
+batch3 = data.frame()
+num = 50
+for (i in 1:length(genres)){
+  set.seed(1)
+  ids = sample(1000,150)
+  batch1_rows = ids[1:50]
+  batch2_rows = ids[51:100]
+  batch3_rows = ids[101:150]
+  batch1 = rbind(batch1,ls[[i]][batch1_rows,])
+  batch2 = rbind(batch2,ls[[i]][batch2_rows,])
+  batch3 = rbind(batch3,ls[[i]][batch3_rows,])
+}
+batch1 %>% group_by(genre) %>% tally()
+```
+
+```{r}
+# Specify 25 random must-links in each genre
+set.seed(1)
+num_pairs = 25
+choices <- matrix(NA, nrow = num_pairs*length(genres), ncol = 2)
+for (i in 1:num_pairs){
+  for (j in 1:length(genres)){
+    choices[(j-1)*num_pairs+i,] <- sample.int(num,2) + (j-1)*num
+  } 
+}
+```
+
+```{r}
+# Get Clustering Assignments
+# We print distribution of clustering assignments, for each genre 
+# Ideally we want most of the clustering assignments to be in one cluster
+
+set.seed(1)
+km <- ckmeans(batch1[,c(5:16)], k = 8, mustLink = choices, cantLink = matrix(c(num*5+1,num+1), nrow = (num+1), ncol = 2), maxIter = 20)
+for (i in 1:length(genres)){
+  print(sort(table(km[c(((i-1)*num+1):(i*num))]),decreasing=TRUE))
+}
+cluster = c()
+for (i in 1:length(genres)){
+  group <- names(sort(table(km[c(((i-1)*num+1):(i*num))]),decreasing=TRUE)[1])
+  cluster = c(cluster, paste(group, genres[i]))
+}
+print(sort(cluster))
+```
+
+```{r}
+groups[[33]] <- c("Children's_Music", "Hip-Hop", "Pop", "R&B", "Rap", "Rock")
+groups[[34]] <- c("Classical", "Movie", "Opera", "Soundtrack")
+groups[[35]] <- c("Blues", "Dance", "Indie", "Soul")
+groups[[36]] <- c("Anime", "Reggae", "Reggaeton", "Ska")
+groups[[37]] <- c("Country", "Folk", "World")
+groups[[38]] <- c("Comedy")
+groups[[39]] <- c("Alternative", "Electronic", "Jazz")
+```
+
+```{r}
+# Repeat for Batch 2, to check conclusions.
+set.seed(1)
+km <- ckmeans(batch2[,c(5:16)], k = 8, mustLink = choices, cantLink = matrix(c(num*5+1,num+1), nrow = 1, ncol = 2), maxIter = 20)
+for (i in 1:length(genres)){
+  print(sort(table(km[c(((i-1)*num+1):(i*num))]),decreasing=TRUE))
+}
+cluster = c()
+for (i in 1:length(genres)){
+  group <- names(sort(table(km[c(((i-1)*num+1):(i*num))]),decreasing=TRUE)[1])
+  cluster = c(cluster, paste(group, genres[i]))
+}
+print(sort(cluster))
+```
+
+```{r}
+groups[[40]] <- c("Alternative", "Anime", "Blues", "Country", "Jazz", "Movie", "Reggae", "Ska")
+groups[[41]] <- c("Classical", "Opera", "Soundtrack")
+groups[[42]] <- c("Dance", "Hip-Hop", "Indie", "Pop", "R&B", "Rap", "Reggaeton", "Rock")
+groups[[43]] <- c("World")
+groups[[44]] <- c("Children's_Music", "Folk", "Soul")
+groups[[45]] <- c("Comedy")
+groups[[46]] <- c("Electronic")
+```
+
+* General Conclusions: 
+* Pop, Hip-Hop, Rap are often clustered together
+* Reggae, Reggaeton are often clustered together
+* Classical and Soundtrack are often clustered together
+* Comedy is often in its own cluster
+
+## Final Spectral Clustering
+
+```{r}
+# Collect all the times any two genres are clustered together
+# Use this to create final adjacency matrix
+
+weight2 <- as.data.frame(matrix(rep(0, length(genres)^2), nrow = length(genres), ncol = length(genres)))
+colnames(weight2) <- genres
+rownames(weight2) <- genres
+for (i in 1:46){
+  vec <- groups[[i]]
+  len <- length(vec)
+  if (len > 1){
+    for (j in 1:(len-1)){
+      for (k in (j+1):len){
+        genre1 = vec[j]
+        genre2 = vec[k]
+        index1 = which(genres == genre1)
+        index2 = which(genres == genre2)
+        weight2[index1, index2] = weight2[index1, index2] + 1
+        weight2[index2, index1] = weight2[index2, index1] + 1
+      }
+    }
+  }
+}
+weight2
+```
+
+```{r}
+# Spectral clustering
+k = 8
+cluster_assignments_final <- spectral.clustering(as.matrix(weight2), K = 8)
+for (i in 1:k){
+  for (j in 1:length(cluster_assignments_final)){
+    if (cluster_assignments_final[j] == i){
+      cat(i, genres[j], " ")
+    }
+  }
+}
+```
+
+* We note that Classical, Opera, Soundtrack are clustered together
+* We note that Hip-Hop, Pop, and Rap are clustered together
+* We note that Reggae, Reggaeton, Ska are clustered together
+* Comedy is in it's own cluster
+
+## Sensitivity Analysis
+
+```{r}
+# Repeat for Batch 3, to check conclusions.
+set.seed(1)
+km <- ckmeans(batch3[,c(5:16)], k = 8, mustLink = choices, cantLink = matrix(c(num*5+1,num+1), nrow = 1, ncol = 2), maxIter = 20)
+cluster = c()
+for (i in 1:length(genres)){
+  group <- names(sort(table(km[c(((i-1)*num+1):(i*num))]),decreasing=TRUE)[1])
+  cluster = c(cluster, paste(group, genres[i]))
+}
+print(sort(cluster))
+```
+
+```{r}
+# c("Hip-Hop", "Indie", "Pop", "R&B", "Rap", "Soul")
+# c("Classical", "Soundtrack")
+# c("Movie", "Opera")
+# c("Country", "Dance", "Folk", "Jazz", "Reggae", "Rock", "Ska")
+# c("Alternative", "Anime", "Reggaeton")
+# c("Comedy")
+# c("Blues", "Children's_Music", "Electronic", "World")
+```
+
+* Similar trends: 
+* Reggae and Ska together 
+* Hip-Hop, Pop, Rap together
+* R&B and Soul are together
+* Classical and Soundtrack are together
+* Comedy is alone
+* In general, non-negligible uncertainty clustering categories like Children's Music, Anime, Alternative, Folk, Jazz, Electronic, World, Indie, and Movie. 
+
+```{r}
+weight3 <- as.data.frame(matrix(rep(0, length(genres)^2), nrow = length(genres), ncol = length(genres)))
+colnames(weight3) <- genres
+rownames(weight3) <- genres
+for (i in 9:46){
+  vec <- groups[[i]]
+  len <- length(vec)
+  if (len > 1){
+    for (j in 1:(len-1)){
+      for (k in (j+1):len){
+        genre1 = vec[j]
+        genre2 = vec[k]
+        index1 = which(genres == genre1)
+        index2 = which(genres == genre2)
+        weight3[index1, index2] = weight3[index1, index2] + 1
+        weight3[index2, index1] = weight3[index2, index1] + 1
+      }
+    }
+  }
+}
+```
+
+```{r}
+set.seed(1)
+k = 7
+cluster_assignments_final2 <- spectral.clustering(as.matrix(weight3), K = k)
+for (i in 0:k){
+  for (j in 1:length(cluster_assignments_final2)){
+    if (cluster_assignments_final2[j] == i){
+      cat(i+1, genres[j], " ")
+    }
+  }
+}
+```
+
+```{r}
+k = 8 
+for (i in 1:k){
+  for (j in 1:length(cluster_assignments_final)){
+    if (cluster_assignments_final[j] == i){
+      cat(i, genres[j], " ")
+    }
+  }
+}
+```
+
+```{r}
+adjustedRandIndex(cluster_assignments_final, cluster_assignments_final2)
+```
+
+* We get similar clustering assignments as before. Conclusions are not changed from before. 
+
+# Classification 
+
+```{r}
+set_clusters <- function(){
+  clusters = list()
+  for (i in 1:8){
+    clusters[[i]] <- genres[which(cluster_assignments_final %in% i)]
+    cat(i,clusters[[i]],'\n')
+    set.seed(3)
+  }
+  return(clusters)
+}
+clusters <- set_clusters()
+```
+
+```{r}
+g2i = dict()
+for (i in 1:length(genres)){
+  g2i[genres[i]] = i
+}
+g2c = dict()
+for (i in 1:length(cluster_assignments_final)){
+  g2c[genres[i]] = cluster_assignments_final[i]
+}
+g2i["Electronic"]
+g2c["Electronic"]
+```
+
+
+```{r}
+for (i in 1:25){
+  subdata = classification_samples[[i]]
+  subdata$cluster = g2c[genres[i]]
+  classification_samples[[i]] <- subdata
+}
+```
+
+```{r}
+# Create Similar and Different Training and Test Sets. 
+# Here are genre assignments.
+# Similar: Pop, Hip-Hop, Rap 11 16 18
+# Different: Classical, Comedy, Hip-Hop 5 6 11
+
+fold <- function(n, genres){
+  data = list()
+  num = 490
+  train_rows = seq(1, 490, 1)
+  test_rows = seq((n-1)*490/5+1, n*490/5, 1)
+  train_rows = train_rows[!(train_rows %in% test_rows)]
+  
+  train = data.frame()
+  test = data.frame()
+  
+  for (i in 1:length(genres)){
+    train = rbind(train,classification_samples[[genres[i]]][train_rows,])
+    test = rbind(test,classification_samples[[genres[i]]][test_rows,])
+  }
+  
+  data[[1]] = train
+  data[[2]] = test
+  
+  return(data)
+}
+```
+
+
+## Random Forest
+
+```{r}
+# Code adapted from https://www.kaylinpavlik.com/classifying-songs-genres/
+get_accuracy_rf <- function(train_set, test_set){
+  model_rf <- randomForest(as.factor(genre) ~ .-cluster, ntree = 500, importance = TRUE, data = train_set)
+  
+  predict_rf <- predict(model_rf, test_set)
+  
+  return(mean(test_set$genre == predict_rf)*100)
+}
+```
+
+## Gradient Boosted Decision Trees
+
+```{r}
+# Code adapted from https://www.kaylinpavlik.com/classifying-songs-genres/
+get_accuracy_gb <- function(train_set, test_set, p){
+  matrix_train_gb <- xgb.DMatrix(data = as.matrix(train_set[,-c(1,14)]), label = as.integer(as.factor(train_set[,1])))
+  matrix_test_gb <- xgb.DMatrix(data = as.matrix(test_set[,-c(1,14)]), label = as.integer(as.factor(test_set[,1])))
+  model_gb <- xgboost(data = matrix_train_gb, 
+                      nrounds = 100,
+                      verbose = FALSE,
+                      params = list(objective = "multi:softmax", num_class = p + 1))
+  predict_gb <- predict(model_gb, matrix_test_gb)
+  
+  return(mean(as.integer(as.factor(test_set[,1])) == predict_gb)*100)
+}
+```
+
+
+## Cross-Validation
+
+```{r}
+cross_validation <- function(genre_indices, model, p){
+  accuracy = c()
+  for (i in 1:5) {
+    data = fold(i, genre_indices)
+    train = data[[1]]
+    test = data[[2]]
+    if (model == "rf"){
+      accuracy = c(accuracy, get_accuracy_rf(train,test))
+    }
+    else if (model == "gb"){
+      accuracy = c(accuracy, get_accuracy_gb(train,test, p))
+    }
+  }
+  return(accuracy)
+}
+```
+
+```{r}
+cross_validation(c(5,6,11), "rf")
+cross_validation(c(11,16,18), "rf")
+cross_validation(c(5,6,11), "gb", 3)
+cross_validation(c(11,16,18), "gb", 3)
+```
+
+* Accuracy is much lower for within-cluster genres, compared to cross-cluster genres.
+
+* Conclusion is the same for gradient-boosted decision trees.
+
+# Let's do a random selection from Categories 1, 2, 3
+
+### Cat 1 = Inter-cluster
+
+```{r}
+#Run this to get results for inter-cluster
+# set.seed(1)
+# results_rf = matrix(NA, nrow = 7, ncol = 5)
+# results_gb = matrix(NA, nrow = 7, ncol = 5)
+# rownames(results_rf) = c(2:8)
+# rownames(results_gb) = c(2:8)
+# 
+# for(p in 2:8){
+#   for (i in 1:5){
+#     cluster_choices = sample(8,p)
+#     genre_selections = c()
+#     for (j in 1:length(cluster_choices)){
+#       genre_choices = clusters[[cluster_choices[j]]]
+#       genre_selected = sample(genre_choices,1)
+#       genre_index = g2i[genre_selected]
+#       genre_selections = c(genre_selections, genre_index)
+#     }
+#     print(genres[genre_selections])
+#     results_rf[p-1,i] <- mean(cross_validation(genre_selections,"rf"))
+#     results_gb[p-1,i] <- mean(cross_validation(genre_selections,"gb", p))
+#   }
+# }
+# write.csv(results_rf, "results_rf_inter.csv")
+# write.csv(results_gb, "results_gb_inter.csv")
+```
+
+```{r}
+# Genres that were selected
+# p = 2
+# "Ska", "Children's_Music"
+# "Ska", "Dance"
+# "Rap", "Jazz"
+# "Country", "World"
+# "Blues", "R&B"
+# p = 3
+# "Blues", "Folk", "Comedy"
+# "Indie", "Blues", "Comedy"
+# "Pop", "Folk", "Country"
+# "Reggaeton", "Movie", "Electronic"
+# "Comedy", "Dance", "Reggae"
+# p = 4
+# "World", "Blues", "Country", "Comedy"
+# "Jazz", "Ska", "Movie", "Dance"
+# "Alternative", "Movie", "R&B", "Soundtrack"
+# "Folk", "Jazz", "Blues", "Reggae"
+# "Opera", "Reggaeton", "Electronic", "Comedy"
+# p = 5
+# "Reggae", "Blues", "Comedy", "Soundtrack", "Jazz"
+# "Anime", "Country", "Dance", "Opera", "Reggae"
+# "Dance", "Folk", "Movie", "Rock", "Soundtrack"
+# "Reggaeton", "Hip-Hop", "Country", "Comedy", "Soundtrack"
+# "Reggaeton", "Comedy", "World", "Rock", "Soul"
+# p = 6
+# "Classical", "Children's_Music", "Comedy", "Ska", "Movie", "Pop"
+# "Dance", "Electronic", "Ska", "Comedy", "Movie", "Alternative"
+#  "Folk", "Comedy", "Hip-Hop", "Rock", "Ska", "Movie"
+# "Country", "Comedy", "Children's_Music", "Reggae", "Hip-Hop", "Jazz"
+# "Opera", "Movie", "Pop", "R&B", "World", "Comedy"
+# p = 7
+# "Movie", "Comedy", "Soul", "World", "Country", "Ska", "Dance"
+# "Folk", "Blues", "Reggaeton", "Opera", "Comedy", "Electronic", "Hip-Hop"
+# "Rap", "R&B", "Opera", "Jazz", "Indie", "Comedy", "Ska"
+# "Electronic", "Comedy", "Reggaeton", "Pop", "Alternative", "Folk", "Classical"
+# "Blues", "Indie", "Hip-Hop", "Jazz", "Folk", "Reggaeton", "Comedy"
+# p = 8
+# "Comedy", "Electronic", "Blues", "Rap", "Reggae", "Alternative", "Classical", "Soul"
+# "Hip-Hop", "Reggae", "Movie", "Opera", "Soul", "Country", "Comedy", "Electronic"
+# "Ska", "World", "Anime", "Dance", "Rock", "Classical", "Comedy", "R&B"
+# "Pop", "Classical", "Children's_Music", "Country", "Reggaeton", "Comedy", "Movie", "World"
+# "Comedy", "R&B", "Blues", "Alternative", "Soundtrack", "Rap", "Electronic", "Reggaeton"    
+```
+
+```{r}
+results_rf_inter <- read.csv("results_rf_inter.csv")
+results_gb_inter <- read.csv("results_gb_inter.csv")
+```
+
+### Cat 2 = Intra-cluster
+
+```{r}
+set.seed(1)
+results_rf_intra = matrix(NA, nrow = 3, ncol = 5)
+results_gb_intra = matrix(NA, nrow = 3, ncol = 5)
+rownames(results_rf_intra) = c(2:4)
+rownames(results_gb_intra) = c(2:4)
+
+for (p in 2:4){
+  if (p == 2 || p == 3){
+    cluster_choices = sample(c(1,2,3,4,6,7,8),5)
+    for (i in 1:5){
+      cluster_choice = cluster_choices[i]
+      len = length(clusters[[cluster_choice]])
+      genre_selected = clusters[[cluster_choice]][sample(len,p)]
+      genre_selections = c()
+      for (j in 1:p){
+        genre_selections = c(genre_selections, g2i[genre_selected[j]])
+      }
+      print(genre_selected)
+      results_rf_intra[p-1,i] <- mean(cross_validation(genre_selections,"rf"))
+      results_gb_intra[p-1,i] <- mean(cross_validation(genre_selections,"gb", p))
+    }
+  }
+  else {
+    cluster_ids = c(3,4)
+    for (i in 1:2){
+      genre_selected = clusters[[cluster_ids[i]]]
+      genre_selections = c()
+      for (j in 1:p){
+        genre_selections = c(genre_selections, g2i[genre_selected[j]])
+      }
+      print(genre_selected)
+      results_rf_intra[p-1,i] <- mean(cross_validation(genre_selections,"rf"))
+      results_gb_intra[p-1,i] <- mean(cross_validation(genre_selections,"gb", p))
+    }
+  }
+}
+write.csv(results_rf_intra, "results_rf_intra.csv")
+write.csv(results_gb_intra, "results_gb_intra.csv")
+```
+
+```{r}
+results_rf_intra <- read.csv("results_rf_intra.csv")
+results_gb_intra <- read.csv("results_gb_intra.csv")
+```
+
+### Cat 3 = Mix
+
+```{r}
+#Run this to get results for mix
+# set.seed(1)
+# results_rf_mix = matrix(NA, nrow = 6, ncol = 5)
+# results_gb_mix = matrix(NA, nrow = 6, ncol = 5)
+# rownames(results_rf_mix) = c(3:8)
+# rownames(results_gb_mix) = c(3:8)
+# 
+# for(p in 3:8){
+#   for (i in 1:5){
+#     samples = sample(25,p)
+#     clusters = cluster_assignments_final[samples]
+#     while(length(unique(clusters))==1 || length(unique(clusters))==p){
+#       samples = sample(25,p)
+#       clusters = cluster_assignments_final[samples]
+#     }
+#     print(genres[samples])
+#     results_rf_mix[p-2,i] <- mean(cross_validation(samples,"rf"))
+#     results_gb_mix[p-2,i] <- mean(cross_validation(samples,"gb", p))
+#   }
+# }
+# write.csv(results_rf_mix, "results_rf_mix.csv")
+# write.csv(results_gb_mix, "results_gb_mix.csv")
+```
+
+```{r}
+# p = 3
+# "Hip-Hop", "Movie", "Rap"
+# "Movie", "Rap", "Blues"
+# "Alternative", "Rock", "Folk"
+# "Blues", "Reggae", "Anime"
+# "Folk", "Children's_Music", "Comedy"
+# p = 4
+# "Rap", "Reggae", "Opera", "Soundtrack"
+# "Rock", "Movie", "Ska", "Anime"
+# "Pop", "Comedy", "Hip-Hop", "Alternative"
+# "Country", "Electronic", "Anime", "Blues"
+# "Comedy", "Jazz", "Hip-Hop", "Dance"
+# p = 5
+# "Rock", "Jazz", "Folk", "Reggae", "Electronic"
+# "Jazz", "Anime", "R&B", "Electronic", "Hip-Hop"
+# "Blues", "Soundtrack", "Jazz", "Movie", "Rock"
+# "Jazz", "Ska", "Movie", "Classical", "Anime"
+# "Movie", "Children's_Music", "Reggaeton", "Pop", "Anime"
+# p = 6
+# "Comedy", "Folk", "R&B", "Ska", "Movie", "Soundtrack"
+# "Anime", "Opera", "Rock", "Ska", "Hip-Hop", "Reggae"
+# "Hip-Hop", "Jazz", "Reggaeton", "Children's_Music", "Dance", "R&B"
+# "Country", "Rap", "Pop", "Children's_Music", "Rock", "Dance"
+# "Rock", "Classical", "Reggae", "Jazz", "Opera", "Pop"
+# p = 7
+# "R&B", "Country", "Movie", "Reggae", "Folk", "Indie", "Children's_Music"
+# "Soul", "World", "Indie", "Movie", "Electronic", "Jazz", "R&B"
+# "Electronic", "World", "Rock", "Comedy", "Folk", "Country", "Blues"
+# "Soundtrack", "Children's_Music", "Movie", "Classical", "Pop", "Rock", "Hip-Hop"
+# "Rap", "Electronic", "Anime", "Hip-Hop", "Ska", "Country", "Opera"
+# p = 8
+# "Anime", "Children's_Music", "Hip-Hop", "Reggae", "Movie", "R&B", "Dance", "Soul"
+# "Opera", "Classical", "Indie", "Folk", "Reggaeton", "Blues", "Soul", "World"
+# "Anime", "Jazz", "World", "Folk", "Blues", "R&B", "Country", "Indie"
+# "Soul", "Comedy", "Ska", "Anime", "Blues", "Indie", "Electronic", "Opera"
+# "World", "Folk", "Comedy", "R&B", "Country", "Pop", "Movie", "Classical"  
+```
+
+```{r}
+results_rf_mix = read.csv("results_rf_mix.csv")
+results_gb_mix = read.csv("results_gb_mix.csv")
+```
+
+```{r}
+rowMeans(results_rf_inter[,-c(1)])
+rowMeans(results_rf_intra[,c(-1)], na.rm = TRUE)
+c(NA,rowMeans(results_rf_mix[,-c(1)]))
+```
+
+```{r}
+get_plot <- function(results_rf_inter, results_rf_mix, results_rf_intra){
+  results_rf_inter <- t(results_rf_inter[,-c(1)])
+  results_rf_intra <- t(results_rf_intra[,-c(1)])
+  results_rf_mix <- t(results_rf_mix[,-c(1)])
+  
+  variety=rep(seq(2,8,1))
+  treatment = rep(c("inter"))
+  combined = c()
+  for (i in 1:5){
+    combined = c(combined, results_rf_inter[i,])
+  }
+  data_inter = data.frame(variety, treatment,  combined)
+  
+  variety=rep(seq(3,8,1))
+  treatment = rep(c("mix"))
+  note = combined
+  combined = c()
+  for (i in 1:5){
+    combined = c(combined, results_rf_mix[i,])
+  }
+  data_mix = data.frame(variety, treatment, combined)
+  
+  variety=rep(seq(2,4,1))
+  treatment = rep(c("intra"))
+  note = combined
+  combined = c()
+  for (i in 1:5){
+    combined = c(combined, results_rf_intra[i,])
+  }
+  data_intra = data.frame(variety, treatment, combined)
+  data_intra <- na.omit(data_intra)
+  
+  data_rf = rbind(data_inter, data_mix, data_intra)
+  data_rf$variety <- as.factor(data_rf$variety)
+  
+  p <- data_rf %>% 
+    ggplot(aes(x=variety, y=combined, fill=factor(treatment), middle = median(combined))) +
+    geom_boxplot(fatten = NULL) +
+    labs(x = "Number of Genres Selected, p", y = "Classification Accuracy (%)") +
+    scale_fill_manual(values=c("green","orange","red")) +
+    stat_summary(fun.y = mean, geom = "errorbar", 
+                 aes(ymax = ..y.., ymin = ..y.., group = factor(treatment)),
+                 width = 0.75, position = position_dodge()) +
+    ggtitle("Classification Accuracy Across Categories of Genre Selections")
+  p$labels$fill <- "Category of\nGenre Selection"
+  print(p)
+}
+```
+
+```{r warning = FALSE}
+get_plot(results_rf_inter, results_rf_mix, results_rf_intra)
+```
+```{r warning = FALSE}
+get_plot(results_gb_inter, results_gb_mix, results_gb_intra)
+```
+
+## Hierarchical Approach 
+
+```{r}
+c2i = list()
+for (i in 1:8){
+  c2i[[i]] <- which(cluster_assignments_final %in% i)
+  cat(i,c2i[[i]],'\n')
+}
+```
+
+```{r}
+models = list()
+for (i in c(1:4,6:8)){
+  data = fold(1, c2i[[i]])
+  train = data[[1]]
+  models[[i]] <- randomForest(as.factor(genre) ~ .-cluster, ntree = 500, importance = TRUE, data = train)
+}
+```
+
+```{r}
+genre_accuracy <- function(cluster_indices){
+  genre_indices = c()
+  for (i in 1:length(cluster_indices)){
+    genre_indices = c(genre_indices,c2i[[cluster_indices[i]]])
+  }
+  data = fold(1, genre_indices)
+  train = data[[1]]
+  test = data[[2]]
+  model_rf <- randomForest(as.factor(genre) ~ .-cluster, ntree = 500, importance = TRUE, data = train)
+  predict_rf <- predict(model_rf, test)
+  return(mean(test$genre == predict_rf)*100)
+}
+```
+
+```{r}
+hierarchical_accuracy <- function(cluster_indices){
+  cat("Genre Accuracy is", genre_accuracy(cluster_indices), "% \n")
+  genre_indices = c()
+  for (i in 1:length(cluster_indices)){
+    genre_indices = c(genre_indices,c2i[[cluster_indices[i]]])
+  }
+  data = fold(1, genre_indices)
+  train = data[[1]]
+  test = data[[2]]
+  model_rf <- randomForest(as.factor(cluster) ~ .-genre, ntree = 500, importance = TRUE, data = train)
+  predict_rf <- predict(model_rf, test)
+  cat("Cluster Accuracy is", mean(test$cluster == predict_rf)*100, "% \n")
+  new_test = test[c(test$cluster == predict_rf),]
+  total = nrow(test)
+  
+  accurate = 0
+  for (i in 1:length(cluster_indices)){
+    test_cluster = subset(new_test, cluster == cluster_indices[i])
+    if (cluster_indices[i] != 5){
+      predict <- predict(models[[cluster_indices[i]]], test_cluster)
+      accurate = accurate + sum(test_cluster$genre == predict)  
+    }
+    else {
+      accurate = accurate + nrow(test_cluster)
+    }
+  }
+  cat("Overall Accuracy is", (accurate/total)*100, "% \n \n")
+}
+```
+
+```{r}
+hierarchical_accuracy(c(1:8))
+```
+
+```{r}
+clusters <- set_clusters()
+```
+
+```{r}
+for (i in 1:6){
+  cluster_choices = sample(c(1:8),2)
+  cat(clusters[[cluster_choices[1]]], ",", clusters[[cluster_choices[2]]], "\n")
+  hierarchical_accuracy(cluster_choices)
+}
+```
+
